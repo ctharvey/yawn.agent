@@ -1,0 +1,56 @@
+.gradle
+build/
+bin/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/resources/*.jar
+!**/src/test/resources/*.jar
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+out/
+!**/src/main/resources/
+!**/src/test/resources/
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+### Others ###
+*.log
+*.swp
+.env
+.DS_Store
+
+### Runtime data & debug output ###
+data/
+jcmd_out.txt
+test_output.txt
+
+# AI/Bot Ephemera
+task.md
+plan.md
+handoff.md
+.agent-memory/
+.cursorrules
+
+# Ensure instruction files are tracked
+!GEMINI.md
+!CLAUDE.md
