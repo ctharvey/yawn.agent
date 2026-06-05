@@ -23,6 +23,18 @@ public record ResolverResponse(
         );
     }
 
+    public static ResolverResponse sealedMisfire(String query) {
+        return new ResolverResponse(
+            query, "high", List.of(),
+            "Query appears to describe a sealed product, not a single card.",
+            null,
+            new SuggestedNext(
+                "/api/agent/sealed/resolve",
+                "Use the sealed product resolver for booster boxes, ETBs, tins, and other sealed items."
+            )
+        );
+    }
+
     public static ResolverResponse matched(String query, String ambiguity,
                                            List<ResolverMatch> matches,
                                            Freshness freshness) {

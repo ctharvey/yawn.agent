@@ -126,7 +126,8 @@ class CardResolverServiceTest {
     }
 
     @Test
-    void resolve_aliasHit_twoCards_lowAmbiguity() {
+    void resolve_aliasHit_twoCards_mediumAmbiguity() {
+        // 2 alias matches → plan spec: 2-3 matches = "medium"
         when(aliasService.resolveAlias("zard")).thenReturn(List.of("base1-4", "sv3pt5-199"));
         when(cardRepository.findById("base1-4"))
                 .thenReturn(Optional.of(card("base1-4", "Charizard", "base1", "4", "Holo Rare")));
@@ -135,30 +136,41 @@ class CardResolverServiceTest {
 
         ResolverResponse response = service.resolve("zard");
         assertThat(response.matches()).hasSize(2);
-        assertThat(response.ambiguity()).isEqualTo("low");
+        assertThat(response.ambiguity()).isEqualTo("medium");
     }
 
     // ---- resolve — ambiguity buckets ----
 
     @Test
     void resolve_singleHighConfidenceCandidate_noneAmbiguity() {
-        // "pikachu v promo": nameTokens=["pikachu","v"], rarityTokens=["promo"]
-        // Score: exact name match (pikachu v) → 0.60 + 0.15 bonus + rarity hit → 0.05 = 0.80
-        // scored.size()==1 && topScore>=0.8 → ambiguity="none"
-        PokemonCardSummary card = card("sv1-01", "Pikachu V", "sv1", "001", "Promo");
+        // "pikachu v swsh promo": nameTokens=["pikachu","v"], setTokens=["swsh"], rarityTokens=["promo"]
+        // Score: name ratio 1.0 → 0.60, exact name "pikachu v" → +0.15,
+        //        set "swsh7".contains("swsh") → +0.20, rarity → +0.05 = 1.00 (capped)
+        // scored.size()==1 && topScore>=0.90 → ambiguity="none"
+        PokemonCardSummary card = card("swsh1-001", "Pikachu V", "swsh7", "001", "Promo");
         when(cardRepository.findByNameContainingIgnoreCase("pikachu")).thenReturn(List.of(card));
 
-        ResolverResponse response = service.resolve("pikachu v promo");
+        ResolverResponse response = service.resolve("pikachu v swsh promo");
         assertThat(response.matches()).hasSize(1);
         assertThat(response.ambiguity()).isEqualTo("none");
     }
 
     @Test
-    void resolve_multipleCandidates_clearLeader_lowAmbiguity() {
+    void resolve_singleMediumConfidenceCandidate_lowAmbiguity() {
         // "charizard ex": nameTokens=["charizard","ex"]
-        // best "Charizard ex": ratio 2/2=1.0 → 0.60 + exact name bonus 0.15 = 0.75
-        // weak "Charizard":   ratio 1/2=0.5 → 0.30, no exact bonus
-        // topScore=0.75 >= 0.70, diff=0.45 > 0.15 → "low"
+        // Score: ratio 1.0 → 0.60, exact name "charizard ex" → +0.15 = 0.75
+        // scored.size()==1, 0.70 <= 0.75 < 0.90 → ambiguity="low"
+        PokemonCardSummary card = card("sv3pt5-199", "Charizard ex", "sv3pt5", "199", "SIR");
+        when(cardRepository.findByNameContainingIgnoreCase("charizard")).thenReturn(List.of(card));
+
+        ResolverResponse response = service.resolve("charizard ex");
+        assertThat(response.matches()).hasSize(1);
+        assertThat(response.ambiguity()).isEqualTo("low");
+    }
+
+    @Test
+    void resolve_multipleCandidates_isMediumAmbiguity() {
+        // 2-3 matches always → "medium" per plan spec (no clear-leader exception)
         PokemonCardSummary best = card("sv3pt5-199", "Charizard ex", "sv3pt5", "199", "SIR");
         PokemonCardSummary weak = card("base1-4", "Charizard", "base1", "4", "Holo Rare");
         when(cardRepository.findByNameContainingIgnoreCase("charizard"))
@@ -166,7 +178,41 @@ class CardResolverServiceTest {
 
         ResolverResponse response = service.resolve("charizard ex");
         assertThat(response.matches()).isNotEmpty();
-        assertThat(response.ambiguity()).isEqualTo("low");
+        assertThat(response.ambiguity()).isEqualTo("medium");
+    }
+
+    // ---- sealed product detection ----
+
+    @Test
+    void resolve_boosterBoxQuery_redirectsSealedResolver() {
+        ResolverResponse response = service.resolve("charizard 151 booster box");
+        assertThat(response.matches()).isEmpty();
+        assertThat(response.ambiguity()).isEqualTo("high");
+        assertThat(response.noMatchReason()).contains("sealed product");
+        assertThat(response.suggestedNext().endpoint()).isEqualTo("/api/agent/sealed/resolve");
+    }
+
+    @Test
+    void resolve_etbQuery_redirectsSealedResolver() {
+        ResolverResponse response = service.resolve("scarlet violet etb");
+        assertThat(response.matches()).isEmpty();
+        assertThat(response.suggestedNext().endpoint()).isEqualTo("/api/agent/sealed/resolve");
+    }
+
+    @Test
+    void resolve_bundleQuery_redirectsSealedResolver() {
+        ResolverResponse response = service.resolve("151 bundle");
+        assertThat(response.matches()).isEmpty();
+        assertThat(response.suggestedNext().endpoint()).isEqualTo("/api/agent/sealed/resolve");
+    }
+
+    @Test
+    void resolve_normalQuery_notDetectedAsSealed() {
+        // "charizard ex" has no sealed phrase — should pass through to card search
+        when(cardRepository.findByNameContainingIgnoreCase("charizard")).thenReturn(List.of());
+        ResolverResponse response = service.resolve("charizard ex");
+        // Would be a card no-match, not a sealed redirect
+        assertThat(response.suggestedNext().endpoint()).isNotEqualTo("/api/agent/sealed/resolve");
     }
 
     // ---- helper ----
