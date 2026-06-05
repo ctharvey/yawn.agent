@@ -80,7 +80,8 @@ public class CardResolverService {
                     .filter(Objects::nonNull)
                     .toList();
                 if (!matches.isEmpty()) {
-                    return buildResponse(normalized, matches, "Matched via alias");
+                    String aliasAmbiguity = matches.size() == 1 ? "none" : "low";
+                    return buildResponse(normalized, aliasAmbiguity, matches);
                 }
             }
         }
@@ -149,7 +150,7 @@ public class CardResolverService {
             .map(s -> buildMatch(s.card(), s.score(), buildWhy(nameTokens, setTokens, rarityTokens, s)))
             .toList();
 
-        return buildResponse(normalized, matches, null);
+        return buildResponse(normalized, ambiguity, matches);
     }
 
     // ---- internal helpers ----
@@ -239,15 +240,8 @@ public class CardResolverService {
         return String.join(", ", parts);
     }
 
-    private ResolverResponse buildResponse(String query, List<ResolverMatch> matches,
-                                            String aliasNote) {
-        String ambiguity;
-        if (matches.size() == 1) {
-            ambiguity = matches.getFirst().confidence() >= 0.85 ? "none" : "low";
-        } else {
-            ambiguity = "medium";
-        }
-
+    private ResolverResponse buildResponse(String query, String ambiguity,
+                                            List<ResolverMatch> matches) {
         Freshness freshness = new Freshness(
             Instant.now(), // placeholder — would read from metadata table
             Instant.now()

@@ -13,7 +13,7 @@ public record ResolverResponse(
 
     public static ResolverResponse noMatch(String query, String reason) {
         return new ResolverResponse(
-            query, "none", List.of(),
+            query, "high", List.of(),
             reason,
             null,
             new SuggestedNext(
