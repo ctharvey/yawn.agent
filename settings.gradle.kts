@@ -7,3 +7,9 @@ dependencyResolutionManagement {
         maven { url = uri("https://jitpack.io") }
     }
 }
+
+includeBuild("../yawn.db") {
+    dependencySubstitution {
+        substitute(module("rip.yawn:yawn.db")).using(project(":"))
+    }
+}

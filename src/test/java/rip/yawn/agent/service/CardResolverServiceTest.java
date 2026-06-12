@@ -115,7 +115,7 @@ class CardResolverServiceTest {
     @Test
     void resolve_aliasHit_singleCard_noneAmbiguity() {
         when(aliasService.resolveAlias("moonbreon")).thenReturn(List.of("swsh7-243"));
-        when(cardRepository.findById("swsh7-243"))
+        when(cardRepository.findSummaryById("swsh7-243"))
                 .thenReturn(Optional.of(card("swsh7-243", "Umbreon VMAX", "swsh7", "243", "Alternate Art Rare")));
 
         ResolverResponse response = service.resolve("moonbreon");
@@ -129,9 +129,9 @@ class CardResolverServiceTest {
     void resolve_aliasHit_twoCards_mediumAmbiguity() {
         // 2 alias matches → plan spec: 2-3 matches = "medium"
         when(aliasService.resolveAlias("zard")).thenReturn(List.of("base1-4", "sv3pt5-199"));
-        when(cardRepository.findById("base1-4"))
+        when(cardRepository.findSummaryById("base1-4"))
                 .thenReturn(Optional.of(card("base1-4", "Charizard", "base1", "4", "Holo Rare")));
-        when(cardRepository.findById("sv3pt5-199"))
+        when(cardRepository.findSummaryById("sv3pt5-199"))
                 .thenReturn(Optional.of(card("sv3pt5-199", "Charizard ex", "sv3pt5", "199", "Special Illustration Rare")));
 
         ResolverResponse response = service.resolve("zard");
@@ -219,22 +219,12 @@ class CardResolverServiceTest {
 
     private PokemonCardSummary card(String id, String name, String setId,
                                     String number, String rarity) {
-        PokemonCardSummary c = new PokemonCardSummary();
-        try {
-            setField(c, "id", id);
-            setField(c, "name", name);
-            setField(c, "setId", setId);
-            setField(c, "number", number);
-            setField(c, "rarity", rarity);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-        return c;
-    }
-
-    private void setField(Object obj, String fieldName, String value) throws Exception {
-        var field = obj.getClass().getDeclaredField(fieldName);
-        field.setAccessible(true);
-        field.set(obj, value);
+        return new PokemonCardSummary() {
+            @Override public String getId() { return id; }
+            @Override public String getName() { return name; }
+            @Override public String getNumber() { return number; }
+            @Override public String getRarity() { return rarity; }
+            @Override public String getSetId() { return setId; }
+        };
     }
 }

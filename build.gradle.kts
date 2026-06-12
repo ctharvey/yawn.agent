@@ -20,6 +20,9 @@ configurations {
 }
 
 dependencies {
+    // Canonical entities/repositories
+    implementation("rip.yawn:yawn.db")
+
     // Web + JPA (read-only)
     implementation("org.springframework.boot:spring-boot-starter-web:3.4.3")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa:3.4.3")

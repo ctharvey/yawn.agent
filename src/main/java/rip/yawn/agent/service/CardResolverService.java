@@ -87,7 +87,7 @@ public class CardResolverService {
             if (!aliasCardIds.isEmpty()) {
                 var matches = aliasCardIds.stream()
                     .map(cardId -> {
-                        var card = cardRepository.findById(cardId);
+                        var card = cardRepository.findSummaryById(cardId);
                         return card.map(c -> buildMatch(c, 0.95, "Matched collector nickname"))
                             .orElse(null);
                     })

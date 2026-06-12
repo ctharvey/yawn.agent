@@ -1,39 +1,23 @@
 package rip.yawn.agent.model;
 
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
-import jakarta.persistence.Table;
-
 /**
- * Lightweight JPA projection onto the pokemon_cards table for
- * agent resolver queries. Read-only; never written by yawn.agent.
+ * Lightweight read-only Spring Data interface projection over the canonical
+ * {@code rip.yawn.db.model.card.PokemonCard} entity (pokemon_cards table).
+ *
+ * <p>Using a projection (rather than a second narrow {@code @Entity} on the
+ * table) satisfies the single-canonical-entity boundary rule while still
+ * fetching only the five columns the agent resolver needs — Spring Data emits
+ * a SELECT limited to these properties for derived queries.
  */
-@Entity
-@Table(name = "pokemon_cards")
-public class PokemonCardSummary {
+public interface PokemonCardSummary {
 
-    @Id
-    @Column(name = "id", length = 64)
-    private String id;
+    String getId();
 
-    @Column(name = "name", length = 256)
-    private String name;
+    String getName();
 
-    @Column(name = "number", length = 32)
-    private String number;
+    String getNumber();
 
-    @Column(name = "rarity", length = 64)
-    private String rarity;
+    String getRarity();
 
-    @Column(name = "set_id", length = 64)
-    private String setId;
-
-    public PokemonCardSummary() {}
-
-    public String getId() { return id; }
-    public String getName() { return name; }
-    public String getNumber() { return number; }
-    public String getRarity() { return rarity; }
-    public String getSetId() { return setId; }
+    String getSetId();
 }
