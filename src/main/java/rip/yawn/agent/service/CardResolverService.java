@@ -30,6 +30,15 @@ public class CardResolverService {
     private static final double WEIGHT_NUMBER_MATCH     = 0.15;
     private static final double WEIGHT_RARITY_MATCH     = 0.05;
 
+    // Sealed-product phrases — queries containing these redirect to the sealed resolver
+    private static final Set<String> SEALED_PHRASES = Set.of(
+        "booster box", "booster pack", "booster bundle",
+        "elite trainer", "etb",
+        "collection box",
+        "blister",
+        "bundle"
+    );
+
     private final PokemonCardSummaryRepository cardRepository;
     private final AliasService aliasService;
 
@@ -45,6 +54,11 @@ public class CardResolverService {
         }
 
         String normalized = query.trim().toLowerCase();
+
+        // 0. Sealed product guard — redirect before any card search
+        if (looksLikeSealed(normalized)) {
+            return ResolverResponse.sealedMisfire(normalized);
+        }
 
         // 1. Tokenize the query
         List<String> tokens = tokenize(normalized);
@@ -73,14 +87,16 @@ public class CardResolverService {
             if (!aliasCardIds.isEmpty()) {
                 var matches = aliasCardIds.stream()
                     .map(cardId -> {
-                        var card = cardRepository.findById(cardId);
+                        var card = cardRepository.findSummaryById(cardId);
                         return card.map(c -> buildMatch(c, 0.95, "Matched collector nickname"))
                             .orElse(null);
                     })
                     .filter(Objects::nonNull)
                     .toList();
                 if (!matches.isEmpty()) {
-                    return buildResponse(normalized, matches, "Matched via alias");
+                    String aliasAmbiguity = matches.size() == 1 ? "none"
+                        : matches.size() <= 3 ? "medium" : "high";
+                    return buildResponse(normalized, aliasAmbiguity, matches);
                 }
             }
         }
@@ -127,29 +143,35 @@ public class CardResolverService {
                 "Query matched cards but confidence was too low");
         }
 
-        // 6. Determine ambiguity
+        // 6. Determine ambiguity — plan spec table:
+        //   none:   1 match, confidence >= 0.90
+        //   low:    1 match, 0.70 <= confidence < 0.90
+        //   medium: 2–3 matches, or 1 match with 0.50 <= confidence < 0.70
+        //   high:   4+ matches, or top confidence < 0.50, or no match
         double topScore = scored.getFirst().score();
         String ambiguity;
         List<ScoredCard> results;
 
-        if (scored.size() == 1 && topScore >= 0.8) {
-            ambiguity = "none";
+        if (scored.size() == 1) {
+            if (topScore >= 0.90)      { ambiguity = "none";   }
+            else if (topScore >= 0.70) { ambiguity = "low";    }
+            else if (topScore >= 0.50) { ambiguity = "medium"; }
+            else                       { ambiguity = "high";   }
             results = scored.subList(0, 1);
-        } else if (scored.size() >= 2 && topScore - scored.get(1).score() > 0.15 && topScore >= 0.7) {
-            // Clear winner
-            ambiguity = "low";
-            results = scored.subList(0, Math.min(3, scored.size()));
-        } else {
-            // Ambiguous — return top candidates with explanation
-            ambiguity = scored.size() >= 2 && topScore > 0.3 ? "medium" : "high";
+        } else if (scored.size() >= 4 || topScore < 0.50) {
+            ambiguity = "high";
             results = scored.subList(0, Math.min(5, scored.size()));
+        } else {
+            // 2–3 matches, topScore >= 0.50
+            ambiguity = "medium";
+            results = scored;
         }
 
         List<ResolverMatch> matches = results.stream()
             .map(s -> buildMatch(s.card(), s.score(), buildWhy(nameTokens, setTokens, rarityTokens, s)))
             .toList();
 
-        return buildResponse(normalized, matches, null);
+        return buildResponse(normalized, ambiguity, matches);
     }
 
     // ---- internal helpers ----
@@ -239,15 +261,8 @@ public class CardResolverService {
         return String.join(", ", parts);
     }
 
-    private ResolverResponse buildResponse(String query, List<ResolverMatch> matches,
-                                            String aliasNote) {
-        String ambiguity;
-        if (matches.size() == 1) {
-            ambiguity = matches.getFirst().confidence() >= 0.85 ? "none" : "low";
-        } else {
-            ambiguity = "medium";
-        }
-
+    private ResolverResponse buildResponse(String query, String ambiguity,
+                                            List<ResolverMatch> matches) {
         Freshness freshness = new Freshness(
             Instant.now(), // placeholder — would read from metadata table
             Instant.now()
@@ -257,6 +272,13 @@ public class CardResolverService {
             return ResolverResponse.matched(query, ambiguity, matches, freshness);
         }
         return ResolverResponse.noMatch(query, "No match found");
+    }
+
+    private static boolean looksLikeSealed(String query) {
+        for (String phrase : SEALED_PHRASES) {
+            if (query.contains(phrase)) return true;
+        }
+        return false;
     }
 
     static List<String> tokenize(String query) {

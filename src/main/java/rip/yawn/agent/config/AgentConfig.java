@@ -5,7 +5,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 
 @Configuration
-@EntityScan(basePackages = "rip.yawn.agent")
+@EntityScan(basePackages = {"rip.yawn.agent", "rip.yawn.db.model.card"})
 @EnableJpaRepositories(basePackages = "rip.yawn.agent")
 public class AgentConfig {
 }
