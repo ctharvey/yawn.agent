@@ -25,8 +25,12 @@ FROM eclipse-temurin:21-jre-jammy
 
 WORKDIR /app
 
-RUN groupadd -r yawn \
-    && useradd -r -g yawn yawn \
+# UID/GID pinned to 997 to match the yawn_logs volume owner. An unpinned
+# `useradd -r` drifts the UID between base-image rebuilds, and the chown below
+# only applies to the image layer -- a mounted volume keeps its own ownership,
+# so a drifted UID silently loses every write to /logs.
+RUN groupadd -r -g 997 yawn \
+    && useradd -r -u 997 -g yawn yawn \
     && mkdir -p /logs \
     && chown -R yawn:yawn /app /logs
 
