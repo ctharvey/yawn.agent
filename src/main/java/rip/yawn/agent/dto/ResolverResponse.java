@@ -11,13 +11,13 @@ public record ResolverResponse(
     SuggestedNext suggestedNext
 ) {
 
-    public static ResolverResponse noMatch(String query, String reason) {
+    public static ResolverResponse noMatch(String query, String reason, String searchEndpoint) {
         return new ResolverResponse(
             query, "high", List.of(),
             reason,
             null,
             new SuggestedNext(
-                "/api/pokemon/cards/search",
+                searchEndpoint,
                 "Try manual search with fewer or different terms"
             )
         );
@@ -28,23 +28,19 @@ public record ResolverResponse(
             query, "high", List.of(),
             "Query appears to describe a sealed product, not a single card.",
             null,
-            new SuggestedNext(
-                "/api/agent/sealed/resolve",
-                "Use the sealed product resolver for booster boxes, ETBs, tins, and other sealed items."
-            )
+            null
         );
     }
 
     public static ResolverResponse matched(String query, String ambiguity,
                                            List<ResolverMatch> matches,
-                                           Freshness freshness) {
+                                           Freshness freshness,
+                                           String cardEndpoint) {
         return new ResolverResponse(
             query, ambiguity, matches,
             null, freshness,
             matches.size() == 1
-                ? new SuggestedNext(
-                    "/api/pokemon/cards/" + matches.getFirst().cardId(),
-                    "Fetch full card details")
+                ? new SuggestedNext(cardEndpoint, "Fetch full card details")
                 : null
         );
     }

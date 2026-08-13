@@ -1,36 +1,40 @@
 package rip.yawn.agent.service;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
-import rip.yawn.agent.dto.Freshness;
 import rip.yawn.agent.dto.ResolverMatch;
 import rip.yawn.agent.dto.ResolverResponse;
+import rip.yawn.agent.model.CardAlias;
 import rip.yawn.agent.model.PokemonCardSummary;
 import rip.yawn.agent.repository.PokemonCardSummaryRepository;
 
-import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
 
 /**
- * Core card resolution logic.
- *
- * Tokenizes the query, resolves aliases, searches by name token + set + number,
- * computes confidence scores, and buckets ambiguity.
+ * Core card resolution logic. Typed aliases are evidence and constraints in
+ * the normal candidate pipeline; they never bypass ranking.
  */
 @Service
 public class CardResolverService {
 
-    private static final Logger log = LoggerFactory.getLogger(CardResolverService.class);
-
-    // Confidence weight ranges
     private static final double WEIGHT_NAME_TOKEN_MATCH = 0.60;
-    private static final double WEIGHT_SET_MATCH        = 0.20;
-    private static final double WEIGHT_NUMBER_MATCH     = 0.15;
-    private static final double WEIGHT_RARITY_MATCH     = 0.05;
+    private static final double WEIGHT_EXACT_NAME_MATCH = 0.15;
+    private static final double WEIGHT_CARD_ALIAS_MATCH = 0.70;
+    private static final double WEIGHT_SET_MATCH = 0.20;
+    private static final double WEIGHT_NUMBER_MATCH = 0.15;
+    private static final double WEIGHT_RARITY_MATCH = 0.05;
+    private static final int MAX_QUERY_LENGTH = 200;
+    private static final int MAX_QUERY_TOKENS = 8;
 
-    // Sealed-product phrases — queries containing these redirect to the sealed resolver
     private static final Set<String> SEALED_PHRASES = Set.of(
         "booster box", "booster pack", "booster bundle",
         "elite trainer", "etb",
@@ -39,210 +43,177 @@ public class CardResolverService {
         "bundle"
     );
 
+    private static final Comparator<ScoredCard> RANK_ORDER = Comparator
+        .comparingDouble(ScoredCard::score).reversed()
+        .thenComparing(scored -> normalize(scored.card().getId()))
+        .thenComparing(scored -> normalize(scored.card().getName()));
+
     private final PokemonCardSummaryRepository cardRepository;
     private final AliasService aliasService;
+    private final ResolverFreshnessProvider freshnessProvider;
+    private final ResolverLinkService linkService;
 
-    public CardResolverService(PokemonCardSummaryRepository cardRepository, AliasService aliasService) {
+    public CardResolverService(PokemonCardSummaryRepository cardRepository,
+                               AliasService aliasService,
+                               ResolverFreshnessProvider freshnessProvider,
+                               ResolverLinkService linkService) {
         this.cardRepository = cardRepository;
         this.aliasService = aliasService;
+        this.freshnessProvider = freshnessProvider;
+        this.linkService = linkService;
     }
 
     @Cacheable("resolver")
     public ResolverResponse resolve(String query) {
         if (query == null || query.isBlank()) {
-            return ResolverResponse.noMatch(query == null ? "" : query, "Query is empty");
+            return noMatch(query == null ? "" : query, "Query is empty");
         }
 
-        String normalized = query.trim().toLowerCase();
-
-        // 0. Sealed product guard — redirect before any card search
+        String normalized = normalize(query);
+        if (normalized.length() > MAX_QUERY_LENGTH) {
+            return noMatch(normalized.substring(0, MAX_QUERY_LENGTH), "Query is too long");
+        }
+        if (tokenize(normalized).size() > MAX_QUERY_TOKENS) {
+            return noMatch(normalized, "Query contains too many distinct terms");
+        }
         if (looksLikeSealed(normalized)) {
             return ResolverResponse.sealedMisfire(normalized);
         }
 
-        // 1. Tokenize the query
-        List<String> tokens = tokenize(normalized);
+        AliasService.AliasResolution aliasResolution = aliasService.resolve(normalized);
+        QueryEvidence queryEvidence = QueryEvidence.from(aliasResolution.remainingTokens());
+        AliasEvidence initialAliasEvidence = AliasEvidence.from(aliasResolution.matches());
 
-        // 2. Identify which tokens are rarity/set aliases vs card name tokens
-        Set<String> rarityAliases = aliasService.getRarityAliases();
-        Set<String> setAliases = aliasService.getSetAliases();
+        if (queryEvidence.nameTokens().isEmpty() && initialAliasEvidence.cardIds().isEmpty()) {
+            return noMatch(normalized, "Query contained only set/rarity terms, no card name");
+        }
 
-        List<String> rarityTokens = new ArrayList<>();
-        List<String> setTokens = new ArrayList<>();
-        List<String> nameTokens = new ArrayList<>();
-
-        for (String token : tokens) {
-            if (rarityAliases.contains(token)) {
-                rarityTokens.add(token);
-            } else if (setAliases.contains(token)) {
-                setTokens.add(token);
-            } else {
-                nameTokens.add(token);
+        Map<String, PokemonCardSummary> candidatesById = new TreeMap<>();
+        for (String cardId : initialAliasEvidence.cardIds()) {
+            cardRepository.findSummaryById(cardId)
+                .ifPresent(card -> candidatesById.put(card.getId(), card));
+        }
+        for (String nameToken : queryEvidence.nameTokens()) {
+            for (PokemonCardSummary card
+                : cardRepository.findTop50ByNameContainingIgnoreCaseOrderByIdAsc(nameToken)) {
+                candidatesById.put(card.getId(), card);
             }
         }
 
-        // 3. Check for alias-based resolution (collector nickname)
-        if (nameTokens.size() <= 2 && normalized.length() < 40) {
-            List<String> aliasCardIds = aliasService.resolveAlias(normalized);
-            if (!aliasCardIds.isEmpty()) {
-                var matches = aliasCardIds.stream()
-                    .map(cardId -> {
-                        var card = cardRepository.findSummaryById(cardId);
-                        return card.map(c -> buildMatch(c, 0.95, "Matched collector nickname"))
-                            .orElse(null);
-                    })
-                    .filter(Objects::nonNull)
-                    .toList();
-                if (!matches.isEmpty()) {
-                    String aliasAmbiguity = matches.size() == 1 ? "none"
-                        : matches.size() <= 3 ? "medium" : "high";
-                    return buildResponse(normalized, aliasAmbiguity, matches);
-                }
-            }
+        if (candidatesById.isEmpty()) {
+            return noMatch(normalized, "No cards matched any evidence in the query");
         }
 
-        // 4. Try resolving by individual name tokens
-        if (nameTokens.isEmpty()) {
-            // Query was all aliases — cannot resolve to a card
-            return ResolverResponse.noMatch(normalized,
-                "Query contained only set/rarity terms, no card name");
-        }
+        ContextualEvidence contextualEvidence = contextualizeAliases(
+            aliasResolution.matches(), queryEvidence, candidatesById.values());
+        AliasEvidence aliasEvidence = AliasEvidence.from(contextualEvidence.aliases());
+        QueryEvidence contextualQueryEvidence = contextualEvidence.query();
 
-        // Search by first name token (most meaningful)
-        String primaryNameToken = nameTokens.getFirst();
-        List<PokemonCardSummary> candidates = cardRepository.findByNameContainingIgnoreCase(primaryNameToken);
-
-        if (candidates.isEmpty()) {
-            // Try the full combined name as a fallback
-            String fullNameQuery = String.join(" ", nameTokens);
-            log.debug("No match on primary token '{}', trying full name '{}'",
-                primaryNameToken, fullNameQuery);
-            // Fall back to a LIKE query on the entire name
-            // (JPA can't do native CONTAINS on whole phrase, so we search each token)
-            for (String token : nameTokens) {
-                candidates = cardRepository.findByNameContainingIgnoreCase(token);
-                if (!candidates.isEmpty()) break;
-            }
-        }
-
-        if (candidates.isEmpty()) {
-            return ResolverResponse.noMatch(normalized,
-                "No cards matched any token in the query");
-        }
-
-        // 5. Score and rank candidates
-        List<ScoredCard> scored = candidates.stream()
-            .map(card -> scoreCard(card, nameTokens, setTokens, rarityTokens))
-            .filter(s -> s.score() > 0.0)
-            .sorted((a, b) -> Double.compare(b.score(), a.score()))
-            .distinct()
+        List<ScoredCard> scored = candidatesById.values().stream()
+            .filter(card -> aliasEvidence.allows(card))
+            .map(card -> scoreCard(card, contextualQueryEvidence, aliasEvidence))
+            .filter(scoredCard -> scoredCard.score() > 0.0)
+            .sorted(RANK_ORDER)
             .toList();
 
         if (scored.isEmpty()) {
-            return ResolverResponse.noMatch(normalized,
-                "Query matched cards but confidence was too low");
+            return noMatch(normalized, "Cards matched the name but not the alias constraints");
         }
 
-        // 6. Determine ambiguity — plan spec table:
-        //   none:   1 match, confidence >= 0.90
-        //   low:    1 match, 0.70 <= confidence < 0.90
-        //   medium: 2–3 matches, or 1 match with 0.50 <= confidence < 0.70
-        //   high:   4+ matches, or top confidence < 0.50, or no match
-        double topScore = scored.getFirst().score();
-        String ambiguity;
-        List<ScoredCard> results;
-
-        if (scored.size() == 1) {
-            if (topScore >= 0.90)      { ambiguity = "none";   }
-            else if (topScore >= 0.70) { ambiguity = "low";    }
-            else if (topScore >= 0.50) { ambiguity = "medium"; }
-            else                       { ambiguity = "high";   }
-            results = scored.subList(0, 1);
-        } else if (scored.size() >= 4 || topScore < 0.50) {
-            ambiguity = "high";
-            results = scored.subList(0, Math.min(5, scored.size()));
-        } else {
-            // 2–3 matches, topScore >= 0.50
-            ambiguity = "medium";
-            results = scored;
-        }
-
-        List<ResolverMatch> matches = results.stream()
-            .map(s -> buildMatch(s.card(), s.score(), buildWhy(nameTokens, setTokens, rarityTokens, s)))
+        RankedResults rankedResults = rank(scored);
+        List<ResolverMatch> matches = rankedResults.cards().stream()
+            .map(scoredCard -> buildMatch(
+                scoredCard.card(),
+                scoredCard.score(),
+                buildWhy(contextualQueryEvidence, aliasEvidence, scoredCard)
+            ))
             .toList();
 
-        return buildResponse(normalized, ambiguity, matches);
+        String cardEndpoint = matches.size() == 1
+            ? linkService.cardDetails(matches.getFirst().cardId())
+            : null;
+        return ResolverResponse.matched(
+            normalized,
+            rankedResults.ambiguity(),
+            matches,
+            freshnessProvider.currentFreshness(),
+            cardEndpoint
+        );
     }
 
-    // ---- internal helpers ----
+    private ResolverResponse noMatch(String query, String reason) {
+        return ResolverResponse.noMatch(query, reason, linkService.cardSearch());
+    }
 
-    private record ScoredCard(PokemonCardSummary card, double score) {}
-
-    private ScoredCard scoreCard(PokemonCardSummary card, List<String> nameTokens,
-                                  List<String> setTokens, List<String> rarityTokens) {
-        String cardName = card.getName().toLowerCase();
-        String cardNumber = card.getNumber() != null ? card.getNumber().toLowerCase() : "";
-        String cardRarity = card.getRarity() != null ? card.getRarity().toLowerCase() : "";
-        String cardSetId = card.getSetId() != null ? card.getSetId().toLowerCase() : "";
-
+    private static ScoredCard scoreCard(PokemonCardSummary card,
+                                        QueryEvidence query,
+                                        AliasEvidence aliases) {
+        String cardName = normalize(card.getName());
+        String cardNumber = normalize(card.getNumber());
         double score = 0.0;
 
-        // Name token matching
-        if (!nameTokens.isEmpty()) {
-            long matchedTokens = nameTokens.stream()
-                .filter(t -> cardName.contains(t) || t.contains(cardName))
+        if (!query.nameTokens().isEmpty()) {
+            long matchedTokens = query.nameTokens().stream()
+                .filter(cardName::contains)
                 .count();
-            double nameRatio = (double) matchedTokens / nameTokens.size();
-            score += nameRatio * WEIGHT_NAME_TOKEN_MATCH;
-
-            // Bonus for exact name match
-            if (cardName.equals(String.join(" ", nameTokens))) {
-                score += 0.15;
+            score += ((double) matchedTokens / query.nameTokens().size())
+                * WEIGHT_NAME_TOKEN_MATCH;
+            if (cardName.equals(String.join(" ", query.nameTokens()))) {
+                score += WEIGHT_EXACT_NAME_MATCH;
             }
         }
 
-        // Set match
-        if (!setTokens.isEmpty()) {
-            for (String setToken : setTokens) {
-                if (cardSetId.contains(setToken)) {
-                    score += WEIGHT_SET_MATCH;
-                    break;
-                }
-            }
-            List<String> aliasCardIds = aliasService.resolveAlias(String.join(" ", setTokens));
-            if (!aliasCardIds.isEmpty() && aliasCardIds.contains(card.getId())) {
-                score += WEIGHT_SET_MATCH;
-            }
+        if (aliases.cardIds().contains(card.getId())) {
+            score += WEIGHT_CARD_ALIAS_MATCH;
+        }
+        if (!aliases.setIds().isEmpty()) {
+            score += WEIGHT_SET_MATCH;
+        }
+        if (!aliases.rarities().isEmpty()) {
+            score += WEIGHT_RARITY_MATCH;
+        }
+        if (query.numbers().stream().anyMatch(number -> numberMatches(cardNumber, number))) {
+            score += WEIGHT_NUMBER_MATCH;
         }
 
-        // Number match
-        if (!nameTokens.isEmpty()) {
-            String lastToken = nameTokens.getLast();
-            if (cardNumber.equals(lastToken) || cardNumber.replaceAll("^0+", "").equals(lastToken)) {
-                score += WEIGHT_NUMBER_MATCH;
-            }
-        }
-
-        // Rarity match
-        if (!rarityTokens.isEmpty()) {
-            for (String rarityToken : rarityTokens) {
-                if (cardRarity.contains(rarityToken)) {
-                    score += WEIGHT_RARITY_MATCH;
-                    break;
-                }
-            }
-        }
-
-        // Cap at 1.0
         return new ScoredCard(card, Math.min(1.0, score));
     }
 
-    private ResolverMatch buildMatch(PokemonCardSummary card, double confidence, String why) {
+    private static boolean numberMatches(String cardNumber, String queryNumber) {
+        String normalizedCardNumber = cardNumber.replaceFirst("^0+(?!$)", "");
+        String normalizedQueryNumber = queryNumber.replaceFirst("^0+(?!$)", "");
+        return cardNumber.equals(queryNumber) || normalizedCardNumber.equals(normalizedQueryNumber);
+    }
+
+    private static RankedResults rank(List<ScoredCard> scored) {
+        double topScore = scored.getFirst().score();
+        if (scored.size() == 1) {
+            String ambiguity;
+            if (topScore >= 0.90) {
+                ambiguity = "none";
+            } else if (topScore >= 0.70) {
+                ambiguity = "low";
+            } else if (topScore >= 0.50) {
+                ambiguity = "medium";
+            } else {
+                ambiguity = "high";
+            }
+            return new RankedResults(ambiguity, scored);
+        }
+        if (scored.size() >= 4 || topScore < 0.50) {
+            return new RankedResults("high", scored.subList(0, Math.min(5, scored.size())));
+        }
+        return new RankedResults("medium", scored);
+    }
+
+    private static ResolverMatch buildMatch(PokemonCardSummary card,
+                                            double confidence,
+                                            String why) {
         return new ResolverMatch(
             card.getId(),
             card.getName(),
             card.getNumber(),
-            null, // setName — would need join to pokemon_sets; TBD
+            null,
             card.getSetId(),
             card.getRarity(),
             Math.round(confidence * 100.0) / 100.0,
@@ -250,44 +221,132 @@ public class CardResolverService {
         );
     }
 
-    private String buildWhy(List<String> nameTokens, List<String> setTokens,
-                             List<String> rarityTokens, ScoredCard scored) {
-        var parts = new ArrayList<String>();
-        if (!nameTokens.isEmpty()) parts.add("matched name tokens");
-        if (!setTokens.isEmpty()) parts.add("set hint matched");
-        if (!rarityTokens.isEmpty()) parts.add("rarity hint matched");
-        if (parts.isEmpty()) parts.add("matched");
-        parts.add("score=" + String.format("%.2f", scored.score()));
+    private static String buildWhy(QueryEvidence query,
+                                   AliasEvidence aliases,
+                                   ScoredCard scored) {
+        List<String> parts = new ArrayList<>();
+        if (!query.nameTokens().isEmpty()) {
+            parts.add("matched name tokens");
+        }
+        if (aliases.cardIds().contains(scored.card().getId())) {
+            parts.add("card alias matched");
+        }
+        if (!aliases.setIds().isEmpty()) {
+            parts.add("set alias matched");
+        }
+        if (!aliases.rarities().isEmpty()) {
+            parts.add("rarity alias matched");
+        }
+        if (!query.numbers().isEmpty()) {
+            parts.add("number evidence considered");
+        }
+        parts.add("score=" + String.format(Locale.ROOT, "%.2f", scored.score()));
         return String.join(", ", parts);
     }
 
-    private ResolverResponse buildResponse(String query, String ambiguity,
-                                            List<ResolverMatch> matches) {
-        Freshness freshness = new Freshness(
-            Instant.now(), // placeholder — would read from metadata table
-            Instant.now()
-        );
-
-        if (!matches.isEmpty()) {
-            return ResolverResponse.matched(query, ambiguity, matches, freshness);
-        }
-        return ResolverResponse.noMatch(query, "No match found");
+    private static boolean looksLikeSealed(String query) {
+        return SEALED_PHRASES.stream().anyMatch(query::contains);
     }
 
-    private static boolean looksLikeSealed(String query) {
-        for (String phrase : SEALED_PHRASES) {
-            if (query.contains(phrase)) return true;
+    static List<String> tokenize(String query) {
+        return Arrays.stream(normalize(query)
+                .replaceAll("[,\\.;:!\\?\"\\(\\)\\[\\]{}]", " ")
+                .split("\\s+"))
+            .filter(token -> !token.isBlank())
+            .distinct()
+            .toList();
+    }
+
+    private static String normalize(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static ContextualEvidence contextualizeAliases(
+        List<CardAlias> aliases,
+        QueryEvidence query,
+        java.util.Collection<PokemonCardSummary> candidates
+    ) {
+        List<CardAlias> activeAliases = new ArrayList<>();
+        List<String> lexicalTokens = new ArrayList<>();
+        lexicalTokens.addAll(query.nameTokens());
+        lexicalTokens.addAll(query.numbers());
+
+        for (CardAlias alias : aliases) {
+            boolean lexicalInCardName = alias.targetType() != CardAlias.TargetType.CARD
+                && candidates.stream().anyMatch(card -> containsTokenPhrase(
+                    tokenize(card.getName()), tokenize(alias.alias())));
+            if (lexicalInCardName) {
+                lexicalTokens.addAll(tokenize(alias.alias()));
+            } else {
+                activeAliases.add(alias);
+            }
+        }
+
+        return new ContextualEvidence(activeAliases, QueryEvidence.from(lexicalTokens));
+    }
+
+    private static boolean containsTokenPhrase(List<String> value, List<String> phrase) {
+        if (phrase.isEmpty() || phrase.size() > value.size()) {
+            return false;
+        }
+        for (int start = 0; start <= value.size() - phrase.size(); start++) {
+            if (value.subList(start, start + phrase.size()).equals(phrase)) {
+                return true;
+            }
         }
         return false;
     }
 
-    static List<String> tokenize(String query) {
-        // Split on whitespace and common punctuation, filter blanks, deduplicate
-        return Arrays.stream(query.toLowerCase().trim()
-                .replaceAll("[,\\.;:!\\?\"\\(\\)\\[\\]{}]", " ")
-                .split("\\s+"))
-            .filter(t -> !t.isBlank())
-            .distinct()
-            .toList();
+    private record ScoredCard(PokemonCardSummary card, double score) {}
+
+    private record RankedResults(String ambiguity, List<ScoredCard> cards) {}
+
+    private record ContextualEvidence(List<CardAlias> aliases, QueryEvidence query) {}
+
+    private record QueryEvidence(List<String> nameTokens, List<String> numbers) {
+        private static QueryEvidence from(List<String> remainingTokens) {
+            List<String> uniqueTokens = remainingTokens.stream().distinct().toList();
+            List<String> numbers = uniqueTokens.stream()
+                .filter(token -> token.matches("\\d+(?:/\\d+)?"))
+                .toList();
+            List<String> names = uniqueTokens.stream()
+                .filter(token -> !numbers.contains(token))
+                .toList();
+            return new QueryEvidence(names, numbers);
+        }
+    }
+
+    private record AliasEvidence(
+        Set<String> cardIds,
+        Set<String> setIds,
+        Set<String> rarities
+    ) {
+        private static AliasEvidence from(List<CardAlias> aliases) {
+            return new AliasEvidence(
+                targets(aliases, CardAlias.TargetType.CARD),
+                targets(aliases, CardAlias.TargetType.SET),
+                targets(aliases, CardAlias.TargetType.RARITY)
+            );
+        }
+
+        private static Set<String> targets(List<CardAlias> aliases,
+                                           CardAlias.TargetType targetType) {
+            return aliases.stream()
+                .filter(alias -> alias.targetType() == targetType)
+                .map(CardAlias::canonicalTarget)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        }
+
+        private boolean allows(PokemonCardSummary card) {
+            return (cardIds.isEmpty() || cardIds.contains(card.getId()))
+                && (setIds.isEmpty() || containsNormalized(setIds, card.getSetId()))
+                && (rarities.isEmpty() || containsNormalized(rarities, card.getRarity()));
+        }
+
+        private static boolean containsNormalized(Set<String> values, String candidate) {
+            String normalizedCandidate = normalize(candidate);
+            return values.stream().map(CardResolverService::normalize)
+                .anyMatch(normalizedCandidate::equals);
+        }
     }
 }

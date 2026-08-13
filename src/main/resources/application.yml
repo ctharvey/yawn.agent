@@ -37,3 +37,7 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+
+yawn:
+  rip:
+    base-url: ${YAWN_RIP_BASE_URL:https://yawn.rip}

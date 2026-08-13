@@ -23,10 +23,13 @@ market snapshots.
 
 - Spring Boot 3.4 on port 8081
 - Java 21
-- Read-only JPA access to the shared yawn Postgres database
-- Standalone Gradle project — no composite build dependency on sibling projects
+- Read-only JPA/JDBC access to the shared yawn Postgres database
+- Gradle composite build with sibling `yawn.db`; override its independent location with `-PyawnDbPath=<path>`
 - Caffeine cache for alias lookups and resolver responses (500 entries, 5m TTL)
-- `card_aliases` table (V47 migration in `yawn.db`) — add nicknames via SQL INSERT, no deploy needed
+- Authoritative `card_aliases_typed` contract from yawn.db V138. CARD, SET, and RARITY aliases are one-to-many, matched longest-first with deterministic ties, and merged into normal candidate ranking. An alias phrase found in a candidate's card name (for example `ex`) stays lexical name evidence instead of becoming a destructive set filter.
+- Public queries are limited to 200 characters, eight distinct terms, and at most 50 ordered candidates per term.
+- Unknown seed and price freshness is returned as `lastSeedSync: null` and `lastPriceUpdate: null`; request time is never presented as data freshness.
+- Public navigation uses `YAWN_RIP_BASE_URL` (default `https://yawn.rip`) and emits absolute, URL-encoded card/search suggestions.
 
 ## Ambiguity spec
 
@@ -38,8 +41,8 @@ market snapshots.
 | `high` | 4+ matches, top confidence < 0.50, or no match |
 
 Queries containing `booster box/pack/bundle`, `etb`, `elite trainer`, `collection box`,
-`blister`, or `bundle` are detected as sealed products and redirect to `/api/agent/sealed/resolve`
-before any card search.
+`blister`, or `bundle` are detected as sealed products before any card search. Because no
+sealed resolver endpoint exists, these responses retain the `suggestedNext` field with a null value.
 
 ## Key classes
 
@@ -47,10 +50,10 @@ before any card search.
 |-------|------|
 | `CardResolverController` | REST entry point |
 | `CardResolverService` | Token scoring, alias lookup, ambiguity bucketing, sealed detection |
-| `AliasService` | DB-backed alias resolution with Caffeine cache |
+| `AliasService` | Longest-first typed alias evidence extraction |
 | `DiscoveryController` | `/agent`, `/agent/tools`, `/llms.txt` |
 | `PokemonCardSummary` | Read-only JPA projection of `pokemon_cards` |
-| `CardAlias` | JPA entity for `card_aliases` |
+| `CardAlias` | Typed V138 alias row from `card_aliases_typed` |
 
 ## Commits
 
@@ -65,19 +68,19 @@ before any card search.
 - `GET /agent/card/{cardId}/profile` — full card metadata
 - `GET /agent/card/{cardId}/variant-guide` — printing variants
 - `GET /agent/card/{cardId}/market-snapshot` — pricing (paid/gated)
-- `GET /api/agent/sealed/resolve` — sealed product resolver
+- A future sealed product resolver; no route is advertised until one exists
 - Populate `setName` in resolver matches (null placeholder; requires join to `pokemon_sets`)
-- Real freshness metadata from catalog metadata table (currently `Instant.now()` placeholder)
+- Wire authoritative catalog/price timestamps through `ResolverFreshnessProvider`
 - Caddy routing + VPS deploy wiring
 
 ## Dependencies
 
 - PostgreSQL (shared `yawn` database)
-- `card_aliases` table seeded via `V47__create_card_aliases.sql` in `yawn.db`
+- `card_aliases_typed` authoritative schema from V138 in `yawn.db`
 
 ## Deployment
 
-- Docker image in `Dockerfile` (lighter than yawn.rip — 512m memory limit)
+- Docker build uses the Yawn family root as context so both `yawn.agent` and `yawn.db` are available to the composite build. `Dockerfile.dockerignore` sends only those two source/build inputs, and the runtime image contains only the Agent artifact.
 - Service entry in `yawn.deploy/docker-compose.yml`
 - Caddy routes `agent.yawn.rip` to this service
 

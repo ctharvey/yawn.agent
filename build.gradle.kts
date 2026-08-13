@@ -44,6 +44,8 @@ dependencies {
 
     // Test
     testImplementation("org.springframework.boot:spring-boot-starter-test:3.4.3")
+    testImplementation("org.flywaydb:flyway-core:11.10.2")
+    testImplementation("org.flywaydb:flyway-database-postgresql:11.10.2")
     testImplementation(platform("org.testcontainers:testcontainers-bom:1.21.3"))
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation("org.testcontainers:postgresql")

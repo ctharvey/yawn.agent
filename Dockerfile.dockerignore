@@ -1,0 +1,24 @@
+# The production build context is the Yawn family parent. Send only the two
+# composite-build inputs required by yawn.agent; exclude sibling repositories,
+# VCS metadata, credentials, caches, and host build outputs by default.
+**
+
+!yawn.agent/
+!yawn.agent/gradle/
+!yawn.agent/gradle/**
+!yawn.agent/gradlew
+!yawn.agent/build.gradle.kts
+!yawn.agent/settings.gradle.kts
+!yawn.agent/gradle.properties
+!yawn.agent/src/
+!yawn.agent/src/**
+
+!yawn.db/
+!yawn.db/gradle/
+!yawn.db/gradle/**
+!yawn.db/gradlew
+!yawn.db/build.gradle.kts
+!yawn.db/settings.gradle.kts
+!yawn.db/gradle.properties
+!yawn.db/src/
+!yawn.db/src/**

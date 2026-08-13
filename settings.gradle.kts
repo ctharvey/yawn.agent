@@ -8,7 +8,9 @@ dependencyResolutionManagement {
     }
 }
 
-includeBuild("../yawn.db") {
+val yawnDbPath = providers.gradleProperty("yawnDbPath").getOrElse("../yawn.db")
+
+includeBuild(yawnDbPath) {
     dependencySubstitution {
         substitute(module("rip.yawn:yawn.db")).using(project(":"))
     }

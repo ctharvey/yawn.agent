@@ -1,25 +1,27 @@
 package rip.yawn.agent.service;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import rip.yawn.agent.model.CardAlias;
 import rip.yawn.agent.repository.CardAliasRepository;
 
-import java.util.Collections;
-import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Locale;
+import java.util.Map;
 
 /**
- * Resolves collector shorthand and nicknames to card IDs.
- * Looks up aliases from the shared card_aliases table.
+ * Finds non-overlapping typed alias evidence in a query. Longer phrases win,
+ * while all V138 targets for the winning phrase are retained.
  */
 @Service
 public class AliasService {
 
-    private static final Logger log = LoggerFactory.getLogger(AliasService.class);
+    private static final Comparator<CardAlias> TARGET_ORDER = Comparator
+        .comparing((CardAlias alias) -> alias.targetType().name())
+        .thenComparing(CardAlias::canonicalTarget);
 
     private final CardAliasRepository aliasRepository;
 
@@ -27,46 +29,93 @@ public class AliasService {
         this.aliasRepository = aliasRepository;
     }
 
-    /**
-     * Find card IDs that match a given alias (nickname, shorthand).
-     */
-    @Cacheable("aliases")
-    public List<String> resolveAlias(String token) {
-        List<CardAlias> aliases = aliasRepository.findByAlias(token.toLowerCase().trim());
-        return aliases.stream()
-            .map(CardAlias::getCardId)
-            .distinct()
+    public AliasResolution resolve(String query) {
+        List<String> queryTokens = tokenize(query);
+        if (queryTokens.isEmpty()) {
+            return new AliasResolution(List.of(), List.of());
+        }
+
+        Map<String, List<CardAlias>> aliasesByPhrase = new LinkedHashMap<>();
+        aliasRepository.findAllLongestFirst().stream()
+            .sorted(Comparator
+                .comparingInt((CardAlias alias) -> normalize(alias.alias()).length()).reversed()
+                .thenComparing(alias -> normalize(alias.alias()))
+                .thenComparing(TARGET_ORDER))
+            .forEach(alias -> aliasesByPhrase
+                .computeIfAbsent(normalize(alias.alias()), ignored -> new ArrayList<>())
+                .add(alias));
+
+        boolean[] consumed = new boolean[queryTokens.size()];
+        List<CardAlias> matches = new ArrayList<>();
+
+        for (Map.Entry<String, List<CardAlias>> entry : aliasesByPhrase.entrySet()) {
+            List<String> aliasTokens = tokenize(entry.getKey());
+            int start = findUnconsumedPhrase(queryTokens, aliasTokens, consumed);
+            if (start < 0) {
+                continue;
+            }
+
+            entry.getValue().stream().sorted(TARGET_ORDER).forEach(matches::add);
+            for (int index = start; index < start + aliasTokens.size(); index++) {
+                consumed[index] = true;
+            }
+        }
+
+        List<String> remainingTokens = new ArrayList<>();
+        for (int index = 0; index < queryTokens.size(); index++) {
+            if (!consumed[index]) {
+                remainingTokens.add(queryTokens.get(index));
+            }
+        }
+
+        return new AliasResolution(matches, remainingTokens);
+    }
+
+    private static int findUnconsumedPhrase(List<String> queryTokens,
+                                             List<String> aliasTokens,
+                                             boolean[] consumed) {
+        if (aliasTokens.isEmpty() || aliasTokens.size() > queryTokens.size()) {
+            return -1;
+        }
+
+        for (int start = 0; start <= queryTokens.size() - aliasTokens.size(); start++) {
+            boolean matches = true;
+            for (int offset = 0; offset < aliasTokens.size(); offset++) {
+                if (consumed[start + offset]
+                    || !queryTokens.get(start + offset).equals(aliasTokens.get(offset))) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                return start;
+            }
+        }
+        return -1;
+    }
+
+    private static List<String> tokenize(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(normalize(value)
+                .replaceAll("[,\\.;:!\\?\"\\(\\)\\[\\]{}]", " ")
+                .split("\\s+"))
+            .filter(token -> !token.isBlank())
             .toList();
     }
 
-    /**
-     * Return the set of rarity shorthand tokens that should be stripped
-     * during token matching (e.g. "sir", "alt", "rainbow").
-     */
-    public Set<String> getRarityAliases() {
-        List<CardAlias> rarities = aliasRepository.findByAliasType("rarity");
-        Set<String> tokens = new HashSet<>();
-        for (CardAlias alias : rarities) {
-            String a = alias.getAlias().toLowerCase().trim();
-            if (!a.isBlank()) {
-                tokens.add(a);
-            }
-        }
-        return Collections.unmodifiableSet(tokens);
+    private static String normalize(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
     }
 
-    /**
-     * Return the set of set shorthand tokens (e.g. "151", "es", "sv").
-     */
-    public Set<String> getSetAliases() {
-        List<CardAlias> sets = aliasRepository.findByAliasType("set");
-        Set<String> tokens = new HashSet<>();
-        for (CardAlias alias : sets) {
-            String a = alias.getAlias().toLowerCase().trim();
-            if (!a.isBlank()) {
-                tokens.add(a);
-            }
+    public record AliasResolution(
+        List<CardAlias> matches,
+        List<String> remainingTokens
+    ) {
+        public AliasResolution {
+            matches = List.copyOf(matches);
+            remainingTokens = List.copyOf(remainingTokens);
         }
-        return Collections.unmodifiableSet(tokens);
     }
 }

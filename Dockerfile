@@ -2,7 +2,13 @@ FROM gradle:8.14.3-jdk21-alpine AS build
 
 WORKDIR /workspace
 
-# Copy agent source
+# Copy both composite-build definitions before evaluating the Agent build.
+COPY yawn.db/gradle yawn.db/gradle
+COPY yawn.db/gradlew yawn.db/gradlew
+COPY yawn.db/build.gradle.kts yawn.db/build.gradle.kts
+COPY yawn.db/settings.gradle.kts yawn.db/settings.gradle.kts
+COPY yawn.db/gradle.properties yawn.db/gradle.properties
+
 COPY yawn.agent/gradle yawn.agent/gradle
 COPY yawn.agent/gradlew yawn.agent/gradlew
 COPY yawn.agent/build.gradle.kts yawn.agent/build.gradle.kts
@@ -14,12 +20,13 @@ RUN sed -i 's/\r$//' yawn.agent/gradlew \
 
 # Pre-resolve dependencies — cached layer
 RUN --mount=type=cache,target=/home/gradle/.gradle,uid=1000,gid=1000 \
-    cd yawn.agent && ./gradlew --no-daemon dependencies
+    cd yawn.agent && ./gradlew --no-daemon dependencies -PyawnDbPath=/workspace/yawn.db
 
+COPY yawn.db/src yawn.db/src
 COPY yawn.agent/src yawn.agent/src
 
 RUN --mount=type=cache,target=/home/gradle/.gradle,uid=1000,gid=1000 \
-    cd yawn.agent && ./gradlew --no-daemon bootJar
+    cd yawn.agent && ./gradlew --no-daemon bootJar -PyawnDbPath=/workspace/yawn.db
 
 FROM eclipse-temurin:21-jre-jammy
 

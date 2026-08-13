@@ -16,11 +16,7 @@ import java.util.Optional;
 @Repository
 public interface PokemonCardSummaryRepository extends JpaRepository<PokemonCard, String> {
 
-    List<PokemonCardSummary> findByNameContainingIgnoreCase(String name);
-
-    List<PokemonCardSummary> findBySetIdAndNumber(String setId, String number);
-
-    List<PokemonCardSummary> findBySetId(String setId);
+    List<PokemonCardSummary> findTop50ByNameContainingIgnoreCaseOrderByIdAsc(String name);
 
     Optional<PokemonCardSummary> findSummaryById(String id);
 }
