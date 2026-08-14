@@ -2,9 +2,11 @@ package rip.yawn.agent.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.sql.DriverManager;
 import java.util.List;
 
 import org.flywaydb.core.Flyway;
+import org.flywaydb.core.api.MigrationVersion;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -79,6 +81,68 @@ class CardAliasRepositoryIntegrationTest {
             .filter(alias -> alias.alias().equals("agent-fixture-zard")))
             .extracting(CardAlias::canonicalTarget)
             .containsExactly("base1-4", "sv3pt5-199");
+    }
+
+    @Test
+    void migrationUpgradeSupportsHibernateOriginSchemaWithoutLegacyV0Columns() throws Exception {
+        String databaseName = "yawn_agent_upgrade";
+        try (var connection = DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+             var statement = connection.createStatement()) {
+            statement.execute("CREATE DATABASE " + databaseName);
+        }
+
+        String upgradeUrl = POSTGRES.getJdbcUrl().replace(POSTGRES.getDatabaseName(), databaseName);
+        Flyway.configure()
+            .dataSource(upgradeUrl, POSTGRES.getUsername(), POSTGRES.getPassword())
+            .locations("classpath:db/migration")
+            .target(MigrationVersion.fromVersion("134"))
+            .load()
+            .migrate();
+
+        try (var connection = DriverManager.getConnection(
+                upgradeUrl, POSTGRES.getUsername(), POSTGRES.getPassword());
+             var statement = connection.createStatement()) {
+            statement.execute("""
+                ALTER TABLE pokemon_cards
+                    DROP COLUMN IF EXISTS variants_first_edition,
+                    DROP COLUMN IF EXISTS variants_holo,
+                    DROP COLUMN IF EXISTS variants_normal,
+                    DROP COLUMN IF EXISTS variants_reverse,
+                    DROP COLUMN IF EXISTS variants_w_promo,
+                    DROP COLUMN IF EXISTS legal_standard,
+                    DROP COLUMN IF EXISTS legal_expanded
+                """);
+            statement.execute("""
+                ALTER TABLE pokemon_cards
+                    ADD COLUMN IF NOT EXISTS first_edition BOOLEAN,
+                    ADD COLUMN IF NOT EXISTS holo BOOLEAN,
+                    ADD COLUMN IF NOT EXISTS normal BOOLEAN,
+                    ADD COLUMN IF NOT EXISTS reverse BOOLEAN,
+                    ADD COLUMN IF NOT EXISTS w_promo BOOLEAN,
+                    ADD COLUMN IF NOT EXISTS standard BOOLEAN,
+                    ADD COLUMN IF NOT EXISTS expanded BOOLEAN
+                """);
+            statement.execute("""
+                ALTER TABLE pokemon_sets
+                    DROP COLUMN IF EXISTS legal_standard,
+                    DROP COLUMN IF EXISTS legal_expanded,
+                    ADD COLUMN IF NOT EXISTS standard BOOLEAN,
+                    ADD COLUMN IF NOT EXISTS expanded BOOLEAN
+                """);
+        }
+
+        Flyway.configure()
+            .dataSource(upgradeUrl, POSTGRES.getUsername(), POSTGRES.getPassword())
+            .locations("classpath:db/migration")
+            .load()
+            .migrate();
+
+        JdbcTemplate upgradeJdbc = new JdbcTemplate(
+            new DriverManagerDataSource(upgradeUrl, POSTGRES.getUsername(), POSTGRES.getPassword()));
+        assertThat(upgradeJdbc.queryForObject(
+            "SELECT COUNT(*) FROM flyway_schema_history WHERE version IN ('135', '139') AND success",
+            Integer.class)).isEqualTo(2);
     }
 
     private static int indexOf(List<CardAlias> aliases, String phrase) {
