@@ -141,8 +141,20 @@ class CardAliasRepositoryIntegrationTest {
         JdbcTemplate upgradeJdbc = new JdbcTemplate(
             new DriverManagerDataSource(upgradeUrl, POSTGRES.getUsername(), POSTGRES.getPassword()));
         assertThat(upgradeJdbc.queryForObject(
-            "SELECT COUNT(*) FROM flyway_schema_history WHERE version IN ('135', '139') AND success",
-            Integer.class)).isEqualTo(2);
+            "SELECT COUNT(*) FROM flyway_schema_history WHERE version IN ('135', '139', '140') AND success",
+            Integer.class)).isEqualTo(3);
+        assertThat(upgradeJdbc.queryForObject("""
+            SELECT COUNT(*)
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relname = 'market_matrix'
+              AND c.relkind = 'm'
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+              AND a.attname IN ('top_10_fmv_sum', 'top_10_card_ids')
+            """, Integer.class)).isEqualTo(2);
     }
 
     private static int indexOf(List<CardAlias> aliases, String phrase) {
