@@ -11,6 +11,10 @@ spring:
     hikari:
       maximum-pool-size: 5
       minimum-idle: 2
+  flyway:
+    # Compatibility shims added below already-applied production versions are
+    # intentionally ignored there; future migrations retain Flyway's default.
+    ignore-migration-patterns: "*:future,*:ignored"
   jpa:
     hibernate:
       ddl-auto: validate
